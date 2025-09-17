@@ -63,7 +63,42 @@ async def upload_document(
             "document_type": document_type,
             "original_filename": file.filename,
         }
+from fastapi import FastAPI
+from fastapi.middleware.cors import CORSMiddleware
 
+from app.api import upload, query
+
+app = FastAPI(
+    title="법률 문서 RAG 시스템",
+    description="법률 문서를 인덱싱하고 질의에 응답하는 RAG 시스템 API",
+    version="1.0.0"
+)
+
+# CORS 설정
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
+# API 라우터 등록
+app.include_router(upload.router, prefix="/api", tags=["문서"])
+app.include_router(query.router, prefix="/api", tags=["질의"])
+
+
+@app.get("/")
+async def root():
+    return {
+        "message": "법률 문서 RAG 시스템 API에 오신 것을 환영합니다",
+        "docs": "/docs"
+    }
+
+
+if __name__ == "__main__":
+    import uvicorn
+    uvicorn.run("app.main:app", host="0.0.0.0", port=8000, reload=True)
         # 사용자 정의 메타데이터 추가
         if custom_metadata:
             import json
