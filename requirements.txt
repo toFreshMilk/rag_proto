@@ -1,17 +1,26 @@
+# requirements.txt
+
+# FastAPI & Server
 fastapi
 uvicorn
-pydantic
-typing-extensions
-scikit-learn
-numpy
-torch
-transformers
-sentence-transformers
-chromadb
 python-multipart
-pillow
-pypdf2
+
+# LangChain Ecosystem
+langchain>=0.1.0
+langchain-community>=0.0.32
+langchain-ollama
+langchain-huggingface  # 추가
+
+# Vector Database
+chromadb
+
+# Embedding
+sentence-transformers
+
+# Document Loaders
+pypdf
 python-docx
-langchain
-langchain-community
-requests
+unstructured[docx,pdf]
+
+# Configuration
+pydantic-settings

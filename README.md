@@ -46,12 +46,16 @@ buptle_rag_proto/
 │   ├── services/        # 비즈니스 로직
 │   ├── utils/           # 유틸리티 함수
 │   └── config.py        # 설정 파일
-├── data/                # 저장된 데이터
+├── data/                # 저장된 데이터 => 용량 문제로 다른 큰 드라이브로 이관
 │   ├── raw/             # 원본 문서
 │   └── processed/       # 처리된 문서
-├── db/                  # 데이터베이스 관련
+├── db/                  # 데이터베이스 관련 => 용량 문제로 다른 큰 드라이브로 이관
 │   └── chroma/          # ChromaDB 저장소
 ├── tests/               # 테스트 코드
 ├── README.md            # 프로젝트 설명
 └── requirements.txt     # 필요 패키지
 ```
+
+켜져 있어야 하는 것들
+1. systemctl status ollama
+2. ss -tlpn | grep :8100

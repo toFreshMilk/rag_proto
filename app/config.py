@@ -1,39 +1,32 @@
-import os
-from pathlib import Path
+# app/config.py
 
-# 기본 경로 설정
-BASE_DIR = Path(__file__).resolve().parent.parent
+from functools import lru_cache
+from pydantic_settings import BaseSettings, SettingsConfigDict
 
-# 데이터 디렉토리 설정
-DATA_DIR = os.path.join(BASE_DIR, "data")
-RAW_DATA_DIR = os.path.join(DATA_DIR, "raw")
-PROCESSED_DATA_DIR = os.path.join(DATA_DIR, "processed")
+class Settings(BaseSettings):
+    """
+    프로젝트의 모든 설정을 관리하는 클래스
+    환경 변수나 .env 파일에서도 값을 읽어올 수 있습니다.
+    """
+    # 모델 설정
+    EMBEDDING_MODEL: str = "jhgan/ko-sroberta-multitask"
+    OLLAMA_MODEL: str = "gemma:2b"
 
-# ChromaDB 설정
-CHROMA_DB_DIR = os.path.join(BASE_DIR, "db", "chroma")
+    # 벡터 DB (Chroma) 설정
+    CHROMA_PERSIST_DIR: str = "/media/dev/a/ragdata/buptle_rag_proto/chroma_db"  #
+    CHROMA_COLLECTION_NAME: str = "buptle_rag_collection"
 
-# 임베딩 모델 설정
-EMBEDDING_MODEL_NAME = "jhgan/ko-sroberta-multitask"
+    # 문서 처리 설정
+    CHUNK_SIZE: int = 1000
+    CHUNK_OVERLAP: int = 200
 
-# API 설정
-API_PREFIX = "/api"
+    # 임시 파일 저장 경로
+    UPLOAD_DIR: str = "uploaded_files"
 
-# 필요한 디렉토리 생성 함수
-def create_directories():
-    directories = [
-        RAW_DATA_DIR,
-        PROCESSED_DATA_DIR,
-        CHROMA_DB_DIR
-    ]
+    # pydantic-settings 설정
+    model_config = SettingsConfigDict(env_file=".env", env_file_encoding='utf-8')
 
-    for directory in directories:
-        os.makedirs(directory, exist_ok=True)
-
-# 서버 설정
-HOST = "0.0.0.0"
-PORT = 8000
-
-# 추후 Milvus로 마이그레이션 시 필요한 설정
-MILVUS_HOST = "localhost"
-MILVUS_PORT = 19530
-USE_MILVUS = False  # 기본값은 ChromaDB 사용
+@lru_cache
+def get_settings() -> Settings:
+    """설정 객체를 반환하는 함수 (캐싱 사용)"""
+    return Settings()
