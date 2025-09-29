@@ -63,6 +63,7 @@ sudo apt install postgresql postgresql-contrib -y
 
 ```bash
 sudo systemctl start postgresql
+sudo systemctl restart postgresql
 sudo systemctl enable postgresql
 sudo systemctl status postgresql
 ```

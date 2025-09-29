@@ -1,98 +1,123 @@
-# /home/dev/buptle_rag_proto/batch_ingest.py
+# scripts/batch_ingest.py
 
 import os
-import sys
 import asyncio
 from pathlib import Path
-from typing import List, Optional, Dict
+from typing import List
+import logging
 
-# --- 경로 설정 ---
-# 이 스크립트 파일의 위치를 기준으로 프로젝트 루트 디렉토리를 계산합니다.
-# 이렇게 하면 어떤 경로에서 python batch_ingest.py를 실행해도 항상 올바르게 동작합니다.
-PROJECT_ROOT = Path(__file__).resolve().parent
-sys.path.insert(0, str(PROJECT_ROOT))
+# SQLAlchemy 세션을 생성하기 위한 설정
+from sqlalchemy import create_engine, select
+from sqlalchemy.orm import sessionmaker
 
-from app.dependencies import get_ingest_service
+# 기존에 만들어 둔 서비스와 모델, 설정들을 그대로 재활용합니다.
+from app.config import settings
 from app.services.ingest_service import IngestService
+from app.services.embedding_service import EmbeddingService
+from app.services.vector_store_service import VectorStoreService
+from app.models.clause import Document
 
-# --- 사용자 설정 ---
-# 1. 문서들이 저장된 외부 디렉토리 경로, 추후 환경 변수 처리 해야할 듯. 그리고 테넌트나 문서 종류별로 폴더링 해야함.
-SOURCE_DOCUMENTS_PATH = "/media/dev/a/docxs"
+# 로깅 설정
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
 
-# 2. 이 일괄 작업으로 추가되는 모든 문서에 적용할 공통 메타데이터 (선택 사항)
-# 특정 테넌트의 데이터를 한 번에 넣는 경우 등에 사용합니다.
-BATCH_METADATA: Optional[Dict] = {
-    "tenant_id": "client_A",
-    "document_type": "contract"
-}
-
-
-# -----------------
-
-class MockUploadFile:
-    """FastAPI의 UploadFile 객체를 흉내 내는 클래스"""
-
-    def __init__(self, file_path: Path):
-        self.file_path = file_path
-        self.filename = file_path.name
-
-    async def read(self) -> bytes:
-        with open(self.file_path, "rb") as f:
-            return f.read()
+# --- FastAPI 밖에서 SQLAlchemy 세션을 사용하기 위한 설정 ---
+engine = create_engine(settings.DATABASE_URL)
+SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
 
 
-async def main():
-    """일괄 문서 인덱싱 작업을 실행하는 메인 함수"""
-    source_dir = Path(SOURCE_DOCUMENTS_PATH)
-    if not source_dir.is_dir():
-        print(f"[오류] 소스 디렉토리를 찾을 수 없습니다: '{SOURCE_DOCUMENTS_PATH}'")
-        print("스크립트 상단의 SOURCE_DOCUMENTS_PATH 변수를 올바른 경로로 수정해주세요.")
+def get_processed_files() -> set:
+    """데이터베이스에서 이미 처리된 파일 이름 목록을 가져옵니다."""
+    db = SessionLocal()
+    try:
+        stmt = select(Document.original_filename)
+        result = db.execute(stmt)
+        processed_files = {row[0] for row in result}
+        logger.info(f"총 {len(processed_files)}개의 기처리된 파일을 확인했습니다.")
+        return processed_files
+    finally:
+        db.close()
+
+
+async def main(docs_path: str, batch_size: int):
+    """
+    지정된 경로의 문서들을 배치 단위로 처리하여 인덱싱합니다.
+    """
+    logger.info("배치 인덱싱 스크립트를 시작합니다.")
+
+    # 1. 서비스 초기화 (의존성 주입을 수동으로 처리)
+    embedding_service = EmbeddingService(
+        model_name=settings.EMBEDDING_MODEL_NAME,
+        device=settings.EMBEDDING_MODEL_DEVICE
+    )
+    # VectorStoreService 초기화 파라미터 이름에 맞춰 수정
+    vector_store_service = VectorStoreService(
+        connection=settings.DATABASE_URL,
+        collection_name=settings.PGVECTOR_COLLECTION_NAME,
+        embeddings=embedding_service.get_embedding_function()
+    )
+
+    # 2. 처리할 파일 목록 준비
+    docs_path = Path(docs_path)
+    if not docs_path.is_dir():
+        logger.error(f"지정한 경로 '{docs_path}'를 찾을 수 없거나 디렉토리가 아닙니다.")
         return
 
-    # IngestService 인스턴스를 가져옵니다.
-    ingest_service: IngestService = get_ingest_service()
-    print("문서 처리 서비스가 초기화되었습니다.")
-
-    allowed_extensions = {".docx", ".pdf"}
-    all_files: List[Path] = [  # 변수 이름 변경
-        p for p in source_dir.rglob("*")
-        if p.is_file() and p.suffix.lower() in allowed_extensions
+    supported_extensions = {".pdf", ".docx"}
+    all_files = [
+        f for f in docs_path.glob("**/*")
+        if f.is_file() and f.suffix.lower() in supported_extensions
     ]
 
-    # --- 테스트를 위해 100개만 선택 ---
-    files_to_process = all_files[:100]
-    # ---------------------------------
-
+    # 3. 이미 처리된 파일 건너뛰기 로직
+    processed_files_set = get_processed_files()
+    files_to_process = [
+        f for f in all_files if f.name not in processed_files_set
+    ]
 
     if not files_to_process:
-        print(f"'{SOURCE_DOCUMENTS_PATH}' 디렉토리에서 처리할 문서를 찾지 못했습니다. (docx, pdf 파일 확인)")
+        logger.info("새롭게 처리할 문서가 없습니다. 모든 문서가 최신 상태입니다.")
         return
 
-    print(f"총 {len(files_to_process)}개의 문서를 처리합니다...")
+    logger.info(f"총 {len(all_files)}개 파일 중, {len(files_to_process)}개를 처리합니다.")
 
-    success_count = 0
-    error_count = 0
+    # 4. 배치 처리
+    files_to_process_batch = files_to_process[:batch_size]
+    logger.info(f"이번 배치에서는 {len(files_to_process_batch)}개 문서를 처리합니다.")
 
-    for i, file_path in enumerate(files_to_process):
-        print(f"  ({i + 1}/{len(files_to_process)}) 처리 중: {file_path.name} ... ", end="", flush=True)
+    for file_path in files_to_process_batch:
+        db_session = SessionLocal()
+        ingest_service = IngestService(
+            db_session=db_session,
+            settings=settings,
+            vector_store=vector_store_service.get_store()
+        )
+
+        logger.info(f"'{file_path.name}' 파일 처리 시작...")
         try:
-            mock_file = MockUploadFile(file_path)
-            await ingest_service.ingest_file(mock_file, BATCH_METADATA)
-            print("성공")
-            success_count += 1
+            with open(file_path, "rb") as f:
+                from fastapi import UploadFile
+                mock_upload_file = UploadFile(filename=file_path.name, file=f)
+
+                metadata = {"document_type": "contract", "tenant_id": "default_tenant"}
+
+                await ingest_service.ingest_file(mock_upload_file, metadata)
+
+            logger.info(f"✅ '{file_path.name}' 파일 처리 완료.")
+
         except Exception as e:
-            print(f"실패. 오류: {e}")
-            error_count += 1
+            logger.error(f"❌ '{file_path.name}' 파일 처리 중 오류 발생: {e}", exc_info=True)
+            db_session.rollback()
+        finally:
+            db_session.close()
 
-    print("\n--- 일괄 처리 완료 ---")
-    print(f"성공: {success_count}개")
-    print(f"실패: {error_count}개")
-
-    db_path = ingest_service.settings.CHROMA_PERSIST_DIR
-    print(f"데이터베이스 '{db_path}'가 '{PROJECT_ROOT}' 폴더 내에 생성/업데이트되었습니다.")
+    logger.info("배치 인덱싱 작업을 완료했습니다.")
 
 
 if __name__ == "__main__":
-    asyncio.run(main())
-# 192.168.1.13
-# 실패하는 케이스는 따로 기록하던지 처리해서 분석해야할듯
+    DOCUMENT_DIRECTORY = os.getenv("LOCAL_DOCS_PATH")
+    BATCH_SIZE = 10
+
+    # 배치 스크립트를 실행할 때 'python -m scripts.batch_ingest' 와 같이 모듈로 실행해야 합니다.
+    asyncio.run(main(DOCUMENT_DIRECTORY, BATCH_SIZE))
+

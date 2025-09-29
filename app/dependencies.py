@@ -4,7 +4,7 @@ from functools import lru_cache
 from sqlalchemy.orm import Session
 from fastapi import Depends
 
-from app.config import get_settings, settings as app_settings, Settings
+from app.config import settings as app_settings
 from app.database import get_db
 from app.services.rag_service import RAGService
 from app.services.ingest_service import IngestService
@@ -24,10 +24,11 @@ def get_vector_store_service(
     embedding_service: EmbeddingService = Depends(get_embedding_service)
 ) -> VectorStoreService:
     """VectorStoreService의 의존성 주입 함수 (캐시됨)"""
+    # VectorStoreService 초기화 파라미터 이름에 맞춰 수정
     return VectorStoreService(
-        db_url=app_settings.DATABASE_URL,
+        connection=app_settings.DATABASE_URL,
         collection_name=app_settings.PGVECTOR_COLLECTION_NAME,
-        embedding_function=embedding_service.get_embedding_function()
+        embeddings=embedding_service.get_embedding_function()
     )
 
 def get_ingest_service(
@@ -49,4 +50,3 @@ def get_rag_service(
         llm_model_name=app_settings.LLM_MODEL_NAME,
         vector_store=vector_store_service.get_store()
     )
-
