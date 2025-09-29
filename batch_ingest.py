@@ -3,8 +3,11 @@
 import os
 import asyncio
 from pathlib import Path
-from typing import List
 import logging
+
+from dotenv import load_dotenv
+# 스크립트가 시작될 때 .env 파일의 환경 변수를 로드합니다.
+load_dotenv()
 
 # SQLAlchemy 세션을 생성하기 위한 설정
 from sqlalchemy import create_engine, select
