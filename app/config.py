@@ -1,32 +1,48 @@
 # app/config.py
 
-from functools import lru_cache
 from pydantic_settings import BaseSettings, SettingsConfigDict
+from functools import lru_cache
+
 
 class Settings(BaseSettings):
-    """
-    프로젝트의 모든 설정을 관리하는 클래스
-    환경 변수나 .env 파일에서도 값을 읽어올 수 있습니다.
-    """
-    # 모델 설정
-    EMBEDDING_MODEL: str = "jhgan/ko-sroberta-multitask"
-    OLLAMA_MODEL: str = "gemma:2b"
+    # .env 파일에서 아래 변수들을 읽어옵니다.
 
-    # 벡터 DB (Chroma) 설정
-    CHROMA_PERSIST_DIR: str = "/media/dev/a/ragdata/buptle_rag_proto/chroma_db"  #
-    CHROMA_COLLECTION_NAME: str = "buptle_rag_collection"
+    # PostgreSQL 데이터베이스 연결 정보
+    DATABASE_URL: str
 
-    # 문서 처리 설정
+    # PGVector 설정
+    PGVECTOR_COLLECTION_NAME: str = "buptle_rag_collection"
+
+    # 임베딩 모델 설정
+    EMBEDDING_MODEL_NAME: str = "ko-sroberta-multitask"
+    EMBEDDING_MODEL_DEVICE: str = "cpu"
+
+    # LLM 모델 설정 (Ollama)
+    LLM_MODEL_NAME: str = "qwen2:7b"
+
+    # 문서 분할 설정
     CHUNK_SIZE: int = 1000
     CHUNK_OVERLAP: int = 200
 
     # 임시 파일 저장 경로
-    UPLOAD_DIR: str = "uploaded_files"
+    UPLOAD_DIR: str = "/tmp/rag_uploads"
 
-    # pydantic-settings 설정
-    model_config = SettingsConfigDict(env_file=".env", env_file_encoding='utf-8')
+    # .env 파일에 존재하여 추가된 필드 (현재 직접 사용되지는 않음)
+    LOCAL_DOCS_PATH: str
 
-@lru_cache
-def get_settings() -> Settings:
-    """설정 객체를 반환하는 함수 (캐싱 사용)"""
-    return Settings()
+    # .env 파일을 읽도록 설정
+    model_config = SettingsConfigDict(
+        env_file=".env",
+        env_file_encoding="utf-8"
+    )
+
+
+# 설정 클래스의 인스턴스를 생성합니다.
+# 이제 다른 모듈에서 'from app.config import settings'로 가져올 수 있습니다.
+settings = Settings()
+
+
+# FastAPI 의존성 주입을 위해 캐시된 함수도 제공합니다.
+@lru_cache()
+def get_settings():
+    return settings

@@ -2,17 +2,21 @@
 
 # FastAPI & Server
 fastapi
-uvicorn
+uvicorn[standard] # uvicorn과 필수 의존성 함께 설치
 python-multipart
 
 # LangChain Ecosystem
-langchain>=0.1.0
-langchain-community>=0.0.32
+langchain>=0.2.0
+langchain-community
+langchain-core
+langchain-text-splitters
 langchain-ollama
-langchain-huggingface  # 추가
+langchain-huggingface
+langchain-postgres  # Chroma 대신 PGVector 사용
 
-# Vector Database
-chromadb
+# ORM and PostgreSQL Driver
+sqlalchemy
+psycopg2-binary   # PostgreSQL 드라이버
 
 # Embedding
 sentence-transformers
