@@ -25,17 +25,39 @@ class IngestService:
 
     def _split_document_into_clauses(self, text: str) -> list[dict]:
         """
-        문서 텍스트를 '조' 단위로 나눈 후, 각 '조'를 다시 '항' 단위로 분할합니다.
-        - 지적 사항 1: '항'(①, 1. 등)을 분리합니다.
-        - 지적 사항 2: content에서 '제X조 제목' 부분을 제거합니다.
+        문서 텍스트를 서문, 조, 항, 호, 목 단위로 지능적으로 분할합니다.
+        1. 조 번호는 숫자만 저장합니다.
+        2. 항/호/목 마커가 없는 단락은 순서에 따라 자동으로 번호를 부여합니다.
+        3. 서문은 조 번호를 '0'으로 지정합니다.
         """
         final_clauses = []
 
-        # 1. '제 O조'를 기준으로 문서 전체를 블록으로 분할
+        # '조' 패턴: 제1조, 제 1조, 제1 조, 제 1 조 (괄호 포함 가능)
         article_pattern = re.compile(r"^(?=제\s*\d+\s*조)", re.MULTILINE)
-        article_blocks = article_pattern.split(text)
+        blocks = article_pattern.split(text, 1)
 
-        for block in article_blocks[1:]:  # 첫 번째 블록은 서문이므로 제외
+        # 1. 서문 처리
+        preamble_text = blocks[0].strip()
+        if preamble_text:
+            preamble_lines = preamble_text.split('\n')
+            preamble_title = preamble_lines[0].strip()
+            preamble_content = '\n'.join(line for line in preamble_lines[1:] if line.strip()).strip()
+            if preamble_content:
+                final_clauses.append({
+                    "jo_number": "0",  # 요구사항 3: 서문은 0으로
+                    "jo_title": preamble_title,
+                    "item_number": "1",  # 서문은 하나의 항으로 간주
+                    "content": preamble_content
+                })
+
+        if len(blocks) < 2:
+            return final_clauses
+
+        # 2. 모든 '조' 블록 처리
+        remaining_text = blocks[1]
+        article_blocks = article_pattern.split(remaining_text)
+
+        for block in article_blocks:
             if not block.strip():
                 continue
 
@@ -43,61 +65,74 @@ class IngestService:
             first_line = lines[0].strip()
 
             # 조 번호와 제목 추출
-            title_pattern = re.match(r"제\s*(\d+)\s*조(?:\s*\((.*?)\))?\s*(.*)", first_line)
-            jo_num_str, jo_title = "", ""
-            if title_pattern:
-                jo_num_str = title_pattern.group(1)
-                jo_title = (title_pattern.group(2) or title_pattern.group(3) or "").strip()
+            title_match = re.match(r"제\s*(\d+)\s*조\s*(?:\((.*?)\))?\s*(.*)|(제\d+조)\[(.*?)\]", first_line)
+            if not title_match: continue
 
-            if not jo_num_str:
-                continue
+            jo_num = ""
+            jo_title = ""
+            if title_match.group(1):  # "제 1조 (제목)"
+                jo_num = title_match.group(1)
+                jo_title = (title_match.group(2) or title_match.group(3) or "").strip()
+            elif title_match.group(4):  # "제7조[제목]"
+                jo_num = re.search(r'\d+', title_match.group(4)).group()
+                jo_title = title_match.group(5).strip()
 
-            # 조 제목 라인을 제외한 나머지 내용
             content_body = '\n'.join(lines[1:]).strip()
 
-            # 2. '항'을 기준으로 나머지 내용을 다시 분할 (①, 1., (1) 등 다양한 형식 지원)
-            # '항' 마커로 시작하는 라인을 찾되, 해당 마커는 분리 후에도 유지(Positive Lookahead)
-            item_pattern = re.compile(r"^(?=\s*(?:[①-⑳]|\d+\.|\(\d+\)|[가-힣]\.))\s*", re.MULTILINE)
-            item_blocks = item_pattern.split(content_body)
+            # 3. '항/호/목' 단위로 분할 또는 자동 번호 부여
+            item_pattern = re.compile(r"^(?=\s*(?:[가-힣]\.|\d+\.|\([가-힣]\)|\(\d+\)|[①-⑳]))", re.MULTILINE)
 
-            if len(item_blocks) <= 1:
-                # '항'이 없는 '조'의 경우, 전체 내용을 하나의 절로 처리
-                if content_body:
+            # '항' 마커가 하나라도 있는지 확인
+            has_explicit_items = item_pattern.search(content_body)
+
+            if has_explicit_items:
+                # 명시적 마커가 있으면, 이전 로직과 유사하게 처리
+                item_blocks = item_pattern.split(content_body)
+
+                # 마커 시작 전 내용 처리
+                if item_blocks[0].strip():
                     final_clauses.append({
-                        "jo_number": f"제{jo_num_str}조",
+                        "jo_number": jo_num,  # 요구사항 1: 숫자만 저장
                         "jo_title": jo_title,
-                        "item_number": None,  # 항이 없으므로 Null
-                        "content": content_body
+                        "item_number": "1",  # 첫 단락은 1항으로 자동 부여
+                        "content": item_blocks[0].strip()
                     })
+
+                for item_block in item_blocks[1:]:
+                    if not item_block.strip(): continue
+
+                    marker_match = re.match(r"^\s*([①-⑳]|\d+\.|\(\d+\)|[가-힣]\.|\([가-힣]\))\s*(.*(?:\n|$))((?:.|\n)*)",
+                                            item_block)
+                    if marker_match:
+                        item_num = marker_match.group(1).strip()
+                        content = (marker_match.group(2) + marker_match.group(3)).strip()
+                        final_clauses.append({
+                            "jo_number": jo_num,
+                            "jo_title": jo_title,
+                            "item_number": item_num,
+                            "content": content
+                        })
+
             else:
-                # '항'이 있는 경우, 각 '항'을 별도의 절로 처리
-                for item_block in item_blocks:
-                    if not item_block.strip():
-                        continue
+                # 요구사항 2: 명시적 마커가 없으면, 빈 줄을 기준으로 단락을 나누고 자동 번호 부여
+                # 연속된 두 개 이상의 개행 문자를 분리 기준으로 사용
+                paragraphs = re.split(r'\n\s*\n', content_body)
+                item_counter = 1
+                for para in paragraphs:
+                    if para.strip():
+                        final_clauses.append({
+                            "jo_number": jo_num,
+                            "jo_title": jo_title,
+                            "item_number": str(item_counter),  # 자동 번호 부여
+                            "content": para.strip()
+                        })
+                        item_counter += 1
 
-                    # '항' 마커와 내용을 분리
-                    item_marker_match = re.match(r"^\s*((?:[①-⑳]|\d+\.|\(\d+\)|[가-힣]\.))\s*(.*)", item_block.strip(),
-                                                 re.DOTALL)
-                    item_num = item_block.strip().split('\n')[0].strip()  # 기본값
-                    item_content = item_block.strip()
-
-                    if item_marker_match:
-                        item_num = item_marker_match.group(1).strip()
-                        # 내용에서 첫 줄의 마커 부분을 제거
-                        item_content = item_marker_match.group(2).strip()
-
-                    final_clauses.append({
-                        "jo_number": f"제{jo_num_str}조",
-                        "jo_title": jo_title,
-                        "item_number": item_num,
-                        "content": item_content
-                    })
-
-        logger.info(f"문서 분할 완료. 총 {len(final_clauses)}개의 조/항 생성.")
+        logger.info(f"문서 분할 완료. 총 {len(final_clauses)}개의 조/항/호/목 생성.")
         return final_clauses
 
     async def ingest_file(self, file_input: Union[UploadFile, str, Path], metadata: Dict):
-        # (파일 처리 앞부분은 이전과 동일)
+        # (이하 로직은 이전과 동일하므로 생략)
         file_path: Path
         filename: str
         temp_file_created = False
@@ -115,17 +150,14 @@ class IngestService:
             filename = file_path.name
 
         try:
-            # DB에 Document 메타데이터 저장
             db_document = Document(tenant_id=metadata.get("tenant_id"), original_filename=filename)
             self.db_session.add(db_document)
             await self.db_session.flush()
 
-            # 텍스트 추출
             text = docx2txt.process(str(file_path))
             if not text or not text.strip():
                 raise ValueError(f"'{filename}' 파일에서 텍스트를 추출하지 못했습니다.")
 
-            # --- ✨✨✨ 개선된 로직 사용 ✨✨✨ ---
             structured_clauses = self._split_document_into_clauses(text)
             if not structured_clauses:
                 raise ValueError("문서에서 조/항을 구조적으로 분리하지 못했습니다.")
@@ -133,15 +165,13 @@ class IngestService:
             clauses_to_add_db = []
             chunks_for_vectorstore = []
             for item in structured_clauses:
-                # RDB 저장용 Clause 객체 (item_number 포함)
                 clauses_to_add_db.append(Clause(
                     document_id=db_document.id,
                     clause_number=item["jo_number"],
                     clause_title=item["jo_title"],
-                    item_number=item["item_number"],  # 신규 필드
+                    item_number=item["item_number"],
                     content=item["content"]
                 ))
-                # VectorDB 저장용 Langchain Document 객체 (메타데이터에 item_number 추가)
                 chunk_metadata = {
                     "document_id": db_document.id,
                     "tenant_id": metadata.get("tenant_id"),
@@ -153,7 +183,6 @@ class IngestService:
                     metadata=chunk_metadata
                 ))
 
-            # DB 및 VectorStore에 저장
             self.db_session.add_all(clauses_to_add_db)
             self.vector_store.add_documents(chunks_for_vectorstore)
             await self.db_session.commit()
