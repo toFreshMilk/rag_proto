@@ -4,123 +4,94 @@ import os
 import asyncio
 from pathlib import Path
 import logging
-
 from dotenv import load_dotenv
-# 스크립트가 시작될 때 .env 파일의 환경 변수를 로드합니다.
+
+# .env 파일 로드를 가장 먼저 실행
 load_dotenv()
 
-# SQLAlchemy 세션을 생성하기 위한 설정
-from sqlalchemy import create_engine, select
-from sqlalchemy.orm import sessionmaker
+# 로깅 기본 설정
+logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
+logger = logging.getLogger(__name__)
 
-# 기존에 만들어 둔 서비스와 모델, 설정들을 그대로 재활용합니다.
+# --- 필요한 모듈 임포트 ---
 from app.config import settings
+from app.models.base import Base  # SQLAlchemy Base 모델 임포트
+from sqlalchemy import text
+from sqlalchemy.ext.asyncio import create_async_engine, AsyncSession
+from sqlalchemy.orm import sessionmaker
 from app.services.ingest_service import IngestService
 from app.services.embedding_service import EmbeddingService
 from app.services.vector_store_service import VectorStoreService
-from app.models.clause import Document
 
-# 로깅 설정
-logging.basicConfig(level=logging.INFO)
-logger = logging.getLogger(__name__)
-
-# --- FastAPI 밖에서 SQLAlchemy 세션을 사용하기 위한 설정 ---
-engine = create_engine(settings.DATABASE_URL)
-SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
+# 비동기 DB 세션 설정 (비동기 URL 사용)
+async_engine = create_async_engine(settings.DATABASE_URL)
+AsyncSessionLocal = sessionmaker(
+    bind=async_engine, class_=AsyncSession, expire_on_commit=False
+)
 
 
-def get_processed_files() -> set:
-    """데이터베이스에서 이미 처리된 파일 이름 목록을 가져옵니다."""
-    db = SessionLocal()
-    try:
-        stmt = select(Document.original_filename)
-        result = db.execute(stmt)
-        processed_files = {row[0] for row in result}
-        logger.info(f"총 {len(processed_files)}개의 기처리된 파일을 확인했습니다.")
-        return processed_files
-    finally:
-        db.close()
+async def main():
+    """스크립트의 메인 실행 함수"""
+    logger.info("=" * 50)
+    logger.info("======= 단일 파일 인덱싱 배치 작업 시작 =======")
+    logger.info("=" * 50)
 
+    target_file_path = settings.TARGET_FILE
+    logger.info(f".env 파일에서 다음 대상 파일을 읽어왔습니다: {target_file_path}")
 
-async def main(docs_path: str, batch_size: int):
-    """
-    지정된 경로의 문서들을 배치 단위로 처리하여 인덱싱합니다.
-    """
-    logger.info("배치 인덱싱 스크립트를 시작합니다.")
-
-    # 1. 서비스 초기화 (의존성 주입을 수동으로 처리)
-    embedding_service = EmbeddingService(
-        model_name=settings.EMBEDDING_MODEL_NAME,
-        device=settings.EMBEDDING_MODEL_DEVICE
-    )
-    # VectorStoreService 초기화 파라미터 이름에 맞춰 수정
-    vector_store_service = VectorStoreService(
-        connection=settings.DATABASE_URL,
-        collection_name=settings.PGVECTOR_COLLECTION_NAME,
-        embeddings=embedding_service.get_embedding_function()
-    )
-
-    # 2. 처리할 파일 목록 준비
-    docs_path = Path(docs_path)
-    if not docs_path.is_dir():
-        logger.error(f"지정한 경로 '{docs_path}'를 찾을 수 없거나 디렉토리가 아닙니다.")
+    if not os.path.isfile(target_file_path):
+        logger.error(f"!!! 치명적 오류: 지정된 테스트 파일이 존재하지 않습니다: {target_file_path}")
         return
 
-    supported_extensions = {".pdf", ".docx"}
-    all_files = [
-        f for f in docs_path.glob("**/*")
-        if f.is_file() and f.suffix.lower() in supported_extensions
-    ]
+    # --- ✨✨✨ 최종 해결 지점: 테이블을 삭제하고 다시 생성하는 로직으로 변경 ✨✨✨ ---
+    logger.info("--- [단계 1/4] DB 스키마 및 데이터 초기화 시작 ---")
+    async with async_engine.begin() as conn:
+        # PGVector 테이블(컬렉션) 먼저 삭제
+        logger.info(f"PGVector 테이블 '{settings.PGVECTOR_COLLECTION_NAME}'을 삭제합니다 (존재 시).")
+        await conn.execute(text(f"DROP TABLE IF EXISTS {settings.PGVECTOR_COLLECTION_NAME} CASCADE;"))
 
-    # 3. 이미 처리된 파일 건너뛰기 로직
-    processed_files_set = get_processed_files()
-    files_to_process = [
-        f for f in all_files if f.name not in processed_files_set
-    ]
+        # SQLAlchemy 모델 테이블들(documents, clauses) 삭제
+        logger.info("SQLAlchemy 모델 테이블(documents, clauses)을 삭제합니다 (존재 시).")
+        await conn.run_sync(Base.metadata.drop_all)
 
-    if not files_to_process:
-        logger.info("새롭게 처리할 문서가 없습니다. 모든 문서가 최신 상태입니다.")
-        return
+        # 최신 모델 기준으로 테이블들 다시 생성
+        logger.info("최신 모델 기준으로 모든 테이블을 다시 생성합니다.")
+        await conn.run_sync(Base.metadata.create_all)
+    logger.info("--- [단계 1/4] DB 스키마 및 데이터 초기화 완료 ---\n")
 
-    logger.info(f"총 {len(all_files)}개 파일 중, {len(files_to_process)}개를 처리합니다.")
-
-    # 4. 배치 처리
-    files_to_process_batch = files_to_process[:batch_size]
-    logger.info(f"이번 배치에서는 {len(files_to_process_batch)}개 문서를 처리합니다.")
-
-    for file_path in files_to_process_batch:
-        db_session = SessionLocal()
-        ingest_service = IngestService(
-            db_session=db_session,
-            settings=settings,
-            vector_store=vector_store_service.get_store()
-        )
-
-        logger.info(f"'{file_path.name}' 파일 처리 시작...")
+    logger.info(f"--- [단계 2/4] 파일 인덱싱 시작: {Path(target_file_path).name} ---")
+    async with AsyncSessionLocal() as db_session:
         try:
-            with open(file_path, "rb") as f:
-                from fastapi import UploadFile
-                mock_upload_file = UploadFile(filename=file_path.name, file=f)
+            logger.info("서비스 의존성(임베딩, 벡터저장소) 생성 중...")
+            embedding_service = EmbeddingService(model_name=settings.EMBEDDING_MODEL_NAME,
+                                                 device=settings.EMBEDDING_MODEL_DEVICE)
 
-                metadata = {"document_type": "contract", "tenant_id": "default_tenant"}
+            vector_store_service = VectorStoreService(
+                connection=settings.SYNC_DATABASE_URL,
+                collection_name=settings.PGVECTOR_COLLECTION_NAME,
+                embeddings=embedding_service.get_embedding_function()
+            )
+            pg_vector_instance = vector_store_service.get_store()
+            logger.info("서비스 의존성 생성 완료 (PGVector는 동기 연결 사용).")
 
-                await ingest_service.ingest_file(mock_upload_file, metadata)
+            logger.info("\n--- [단계 3/4] IngestService 생성 및 실행 ---")
+            ingest_service = IngestService(db_session=db_session, settings=settings, vector_store=pg_vector_instance)
 
-            logger.info(f"✅ '{file_path.name}' 파일 처리 완료.")
+            metadata = {"document_type": "contract", "tenant_id": "single_test"}
+            await ingest_service.ingest_file(target_file_path, metadata)
+
+            logger.info(f"--- [단계 4/4] 단일 파일 처리 성공: {Path(target_file_path).name} ---\n")
 
         except Exception as e:
-            logger.error(f"❌ '{file_path.name}' 파일 처리 중 오류 발생: {e}", exc_info=True)
-            db_session.rollback()
-        finally:
-            db_session.close()
+            logger.critical(f"!!! 배치 작업 중 처리되지 않은 심각한 예외 발생: {e}", exc_info=True)
 
-    logger.info("배치 인덱싱 작업을 완료했습니다.")
+    logger.info("=" * 50)
+    logger.info("======= 단일 파일 인덱싱 배치 작업 종료 =======")
+    logger.info("=" * 50)
 
 
 if __name__ == "__main__":
-    DOCUMENT_DIRECTORY = os.getenv("LOCAL_DOCS_PATH")
-    BATCH_SIZE = 10
-
-    # 배치 스크립트를 실행할 때 'python -m scripts.batch_ingest' 와 같이 모듈로 실행해야 합니다.
-    asyncio.run(main(DOCUMENT_DIRECTORY, BATCH_SIZE))
-
+    try:
+        asyncio.run(main())
+    except Exception as e:
+        logger.critical(f"!!! 최상위 레벨에서 오류 발생: {e}", exc_info=True)

@@ -99,6 +99,7 @@ ALTER DEFAULT PRIVILEGES IN SCHEMA public GRANT ALL PRIVILEGES ON TABLES TO bupt
 -- 5. 앞으로 생성될 '모든 새로운' 시퀀스에 대해서도 자동으로 모든 권한 부여
 ALTER DEFAULT PRIVILEGES IN SCHEMA public GRANT ALL PRIVILEGES ON SEQUENCES TO buptle_rag_user;
 
+      6. 오토 커밋 설정
        
 ```
 

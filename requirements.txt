@@ -1,8 +1,6 @@
-# requirements.txt
-
 # FastAPI & Server
 fastapi
-uvicorn[standard] # uvicorn과 필수 의존성 함께 설치
+uvicorn[standard]
 python-multipart
 
 # LangChain Ecosystem
@@ -12,11 +10,13 @@ langchain-core
 langchain-text-splitters
 langchain-ollama
 langchain-huggingface
-langchain-postgres  # Chroma 대신 PGVector 사용
+langchain-postgres
 
-# ORM and PostgreSQL Driver
+# ORM and PostgreSQL Drivers
 sqlalchemy
-psycopg2-binary   # PostgreSQL 드라이버
+asyncpg                 # 비동기 드라이버 (greenlet 에러 해결)
+psycopg-binary          # 동기 드라이버 (필요 시 사용)
+greenlet                # SQLAlchemy 비동기 지원용
 
 # Embedding
 sentence-transformers
@@ -25,6 +25,8 @@ sentence-transformers
 pypdf
 python-docx
 unstructured[docx,pdf]
+docx2txt
 
-# Configuration
+# Environment & Configuration
 pydantic-settings
+python-dotenv           # .env 파일 로드용

@@ -29,8 +29,11 @@ class Clause(Base):
 
     clause_number = Column(String, index=True)  # 예: "제3조"
     clause_title = Column(String)  # 예: "계약의 해지"
-    content = Column(Text, nullable=False)
 
+    # --- ✨✨✨ 신규 컬럼 추가 ✨✨✨ ---
+    item_number = Column(String, index=True, nullable=True)  # 항 번호. 예: "1", "2", "①"
+
+    content = Column(Text, nullable=False)  # 조/항의 실제 내용
     created_at = Column(DateTime, server_default=func.now())
 
     document = relationship("Document", back_populates="clauses")

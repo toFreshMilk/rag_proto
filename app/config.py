@@ -3,32 +3,28 @@
 from pydantic_settings import BaseSettings, SettingsConfigDict
 from functools import lru_cache
 
-
 class Settings(BaseSettings):
-    # .env 파일에서 아래 변수들을 읽어옵니다.
+    """
+    .env 파일의 설정 값들을 읽어와 관리하는 클래스.
+    Pydantic을 통해 타입 검증 및 기본값 설정이 이루어집니다.
+    """
+    # --- 데이터베이스 ---
+    DATABASE_URL: str         # 비동기 ORM용
+    SYNC_DATABASE_URL: str    # 동기 라이브러리용 (PGVector)
+    PGVECTOR_COLLECTION_NAME: str
 
-    # PostgreSQL 데이터베이스 연결 정보
-    DATABASE_URL: str
+    # --- 임베딩 모델 ---
+    EMBEDDING_MODEL_NAME: str
+    EMBEDDING_MODEL_DEVICE: str
+    VECTOR_SIZE: int
 
-    # PGVector 설정
-    PGVECTOR_COLLECTION_NAME: str = "buptle_rag_collection"
+    # --- LLM 모델 ---
+    LLM_MODEL_NAME: str
 
-    # 임베딩 모델 설정
-    EMBEDDING_MODEL_NAME: str = "ko-sroberta-multitask"
-    EMBEDDING_MODEL_DEVICE: str = "cpu"
-
-    # LLM 모델 설정 (Ollama)
-    LLM_MODEL_NAME: str = "qwen2:7b"
-
-    # 문서 분할 설정
-    CHUNK_SIZE: int = 1000
-    CHUNK_OVERLAP: int = 200
-
-    # 임시 파일 저장 경로
-    UPLOAD_DIR: str = "/tmp/rag_uploads"
-
-    # .env 파일에 존재하여 추가된 필드 (현재 직접 사용되지는 않음)
+    # --- 파일 경로 ---
     LOCAL_DOCS_PATH: str
+    TARGET_FILE: str
+    UPLOAD_DIR: str
 
     # .env 파일을 읽도록 설정
     model_config = SettingsConfigDict(
@@ -36,13 +32,10 @@ class Settings(BaseSettings):
         env_file_encoding="utf-8"
     )
 
-
-# 설정 클래스의 인스턴스를 생성합니다.
-# 이제 다른 모듈에서 'from app.config import settings'로 가져올 수 있습니다.
+# 설정 클래스의 인스턴스를 생성. 애플리케이션 전역에서 사용.
 settings = Settings()
 
-
-# FastAPI 의존성 주입을 위해 캐시된 함수도 제공합니다.
 @lru_cache()
 def get_settings():
+    """FastAPI 의존성 주입에서 사용할 캐시된 설정 함수"""
     return settings
