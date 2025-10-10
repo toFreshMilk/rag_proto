@@ -8,6 +8,14 @@ class Settings(BaseSettings):
     .env 파일의 설정 값들을 읽어와 관리하는 클래스.
     Pydantic을 통해 타입 검증 및 기본값 설정이 이루어집니다.
     """
+
+    # --- Azure OpenAI ---
+    AZURE_OPENAI_API_KEY: str
+    AZURE_OPENAI_ENDPOINT: str
+    AZURE_OPENAI_API_VERSION: str
+    OPENAI_API_TYPE: str
+    AZURE_OPENAI_CHAT_DEPLOYMENT_NAME: str
+
     # --- 데이터베이스 ---
     DATABASE_URL: str         # 비동기 ORM용
     SYNC_DATABASE_URL: str    # 동기 라이브러리용 (PGVector)

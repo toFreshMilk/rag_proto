@@ -2,14 +2,18 @@
 
 import os
 import docx2txt
-import re
+import json
 from pathlib import Path
-from typing import Dict, Union
+from typing import Dict, Union, List
 import logging
 from fastapi import UploadFile
+
 from sqlalchemy.ext.asyncio import AsyncSession
 from langchain_core.documents import Document as LangchainDocument
 from langchain_postgres.vectorstores import PGVector
+from langchain_openai import AzureChatOpenAI # Azure용 클래스 임포트
+from langchain_core.prompts import ChatPromptTemplate
+from langchain_core.output_parsers import StrOutputParser
 
 from app.config import Settings
 from app.models.clause import Document, Clause
@@ -23,116 +27,68 @@ class IngestService:
         self.settings = settings
         self.vector_store = vector_store
 
-    def _split_document_into_clauses(self, text: str) -> list[dict]:
+        # --- ✨✨✨ LLM 교체 (Azure OpenAI) ✨✨✨ ---
+        self.llm = AzureChatOpenAI(
+            azure_endpoint=settings.AZURE_OPENAI_ENDPOINT,
+            api_key=settings.AZURE_OPENAI_API_KEY,
+            api_version=settings.AZURE_OPENAI_API_VERSION,
+            azure_deployment=settings.AZURE_OPENAI_CHAT_DEPLOYMENT_NAME,
+            temperature=0,
+            # Azure API는 JSON 모드를 지원하므로, 프롬프트에서 강력하게 지시하는 것으로 충분
+        )
+        logger.info(f"Azure LLM 모델 '{settings.AZURE_OPENAI_CHAT_DEPLOYMENT_NAME}'이 초기화되었습니다.")
+
+    def _get_structured_data_from_llm(self, document_text: str) -> List[Dict]:
+        logger.info("OpenAI API를 통해 문서 구조화를 시작합니다.")
+
+        system_prompt = """
+        당신은 법률 문서를 분석하여 JSON 형식으로 구조화하는 최고의 전문가입니다.
+        주어진 계약서 텍스트를 분석하고, 결과를 반드시 하나의 JSON 객체로만 출력해야 합니다.
+        JSON 객체는 "clauses"라는 키를 가져야 하며, 그 값은 각 조항 정보를 담은 객체들의 배열입니다.
+        다른 어떤 설명이나 서론, 결론도 없이 오직 JSON 객체만 출력하십시오.
         """
-        문서 텍스트를 서문, 조, 항, 호, 목 단위로 지능적으로 분할합니다.
-        1. 조 번호는 숫자만 저장합니다.
-        2. 항/호/목 마커가 없는 단락은 순서에 따라 자동으로 번호를 부여합니다.
-        3. 서문은 조 번호를 '0'으로 지정합니다.
+
+        human_prompt = """
+        아래의 지시사항을 반드시 따라서 주어진 계약서 텍스트를 분석하고, 결과를 JSON 객체로 출력해 주십시오.
+
+        **지시사항:**
+        1. 계약서의 본문 내용만 분석하고, 양 당사자의 서명(날인)이 나타난 이후의 내용은 '첨부 자료'로 간주하여 완전히 무시하십시오.
+        2. 본문 시작 전의 제목과 당사자 정보 등은 '서문'으로 간주하고, '조' 번호는 "0"으로, '항' 번호는 "1"로 지정하십시오.
+        3. '제O조'에서 '조' 번호는 숫자만 추출하여 "clause_number"에 문자열로 할당하십시오.
+        4. '조'의 제목을 "clause_title"에 할당하십시오.
+        5. '항(①, ②...)', '호(1., 2...)', '목(가., 나...)'은 모두 "item_number"에 해당 마커('①', '1.', '가.')를 그대로 할당하십시오.
+        6. 만약 '조' 아래에 명시적인 '항'이나 '호'가 없다면, 해당 '조'의 전체 내용을 하나의 항으로 간주하고 "item_number"를 "1"로 지정하십시오.
+
+        **계약서 텍스트:**
+        {document_text}
         """
-        final_clauses = []
 
-        # '조' 패턴: 제1조, 제 1조, 제1 조, 제 1 조 (괄호 포함 가능)
-        article_pattern = re.compile(r"^(?=제\s*\d+\s*조)", re.MULTILINE)
-        blocks = article_pattern.split(text, 1)
+        prompt = ChatPromptTemplate.from_messages([
+            ("system", system_prompt),
+            ("human", human_prompt)
+        ])
 
-        # 1. 서문 처리
-        preamble_text = blocks[0].strip()
-        if preamble_text:
-            preamble_lines = preamble_text.split('\n')
-            preamble_title = preamble_lines[0].strip()
-            preamble_content = '\n'.join(line for line in preamble_lines[1:] if line.strip()).strip()
-            if preamble_content:
-                final_clauses.append({
-                    "jo_number": "0",  # 요구사항 3: 서문은 0으로
-                    "jo_title": preamble_title,
-                    "item_number": "1",  # 서문은 하나의 항으로 간주
-                    "content": preamble_content
-                })
+        # StrOutputParser는 LLM의 순수 텍스트 출력을 받아오고, json.loads로 파싱
+        chain = prompt | self.llm | StrOutputParser()
 
-        if len(blocks) < 2:
-            return final_clauses
+        try:
+            response_str = chain.invoke({"document_text": document_text})
+            # LLM이 반환한 JSON 문자열을 파이썬 딕셔너리로 변환
+            response_json = json.loads(response_str)
 
-        # 2. 모든 '조' 블록 처리
-        remaining_text = blocks[1]
-        article_blocks = article_pattern.split(remaining_text)
+            clauses = response_json.get("clauses", [])
+            logger.info(f"OpenAI API로부터 총 {len(clauses)}개의 구조화된 조항을 성공적으로 추출했습니다.")
+            return clauses
+        except (json.JSONDecodeError, KeyError) as e:
+            logger.error(f"LLM 결과 처리 중 오류 발생: {e}", exc_info=True)
+            raise ValueError("OpenAI API로부터 유효한 'clauses' JSON 배열을 얻는 데 실패했습니다.")
 
-        for block in article_blocks:
-            if not block.strip():
-                continue
-
-            lines = block.strip().split('\n')
-            first_line = lines[0].strip()
-
-            # 조 번호와 제목 추출
-            title_match = re.match(r"제\s*(\d+)\s*조\s*(?:\((.*?)\))?\s*(.*)|(제\d+조)\[(.*?)\]", first_line)
-            if not title_match: continue
-
-            jo_num = ""
-            jo_title = ""
-            if title_match.group(1):  # "제 1조 (제목)"
-                jo_num = title_match.group(1)
-                jo_title = (title_match.group(2) or title_match.group(3) or "").strip()
-            elif title_match.group(4):  # "제7조[제목]"
-                jo_num = re.search(r'\d+', title_match.group(4)).group()
-                jo_title = title_match.group(5).strip()
-
-            content_body = '\n'.join(lines[1:]).strip()
-
-            # 3. '항/호/목' 단위로 분할 또는 자동 번호 부여
-            item_pattern = re.compile(r"^(?=\s*(?:[가-힣]\.|\d+\.|\([가-힣]\)|\(\d+\)|[①-⑳]))", re.MULTILINE)
-
-            # '항' 마커가 하나라도 있는지 확인
-            has_explicit_items = item_pattern.search(content_body)
-
-            if has_explicit_items:
-                # 명시적 마커가 있으면, 이전 로직과 유사하게 처리
-                item_blocks = item_pattern.split(content_body)
-
-                # 마커 시작 전 내용 처리
-                if item_blocks[0].strip():
-                    final_clauses.append({
-                        "jo_number": jo_num,  # 요구사항 1: 숫자만 저장
-                        "jo_title": jo_title,
-                        "item_number": "1",  # 첫 단락은 1항으로 자동 부여
-                        "content": item_blocks[0].strip()
-                    })
-
-                for item_block in item_blocks[1:]:
-                    if not item_block.strip(): continue
-
-                    marker_match = re.match(r"^\s*([①-⑳]|\d+\.|\(\d+\)|[가-힣]\.|\([가-힣]\))\s*(.*(?:\n|$))((?:.|\n)*)",
-                                            item_block)
-                    if marker_match:
-                        item_num = marker_match.group(1).strip()
-                        content = (marker_match.group(2) + marker_match.group(3)).strip()
-                        final_clauses.append({
-                            "jo_number": jo_num,
-                            "jo_title": jo_title,
-                            "item_number": item_num,
-                            "content": content
-                        })
-
-            else:
-                # 요구사항 2: 명시적 마커가 없으면, 빈 줄을 기준으로 단락을 나누고 자동 번호 부여
-                # 연속된 두 개 이상의 개행 문자를 분리 기준으로 사용
-                paragraphs = re.split(r'\n\s*\n', content_body)
-                item_counter = 1
-                for para in paragraphs:
-                    if para.strip():
-                        final_clauses.append({
-                            "jo_number": jo_num,
-                            "jo_title": jo_title,
-                            "item_number": str(item_counter),  # 자동 번호 부여
-                            "content": para.strip()
-                        })
-                        item_counter += 1
-
-        logger.info(f"문서 분할 완료. 총 {len(final_clauses)}개의 조/항/호/목 생성.")
-        return final_clauses
-
+    # ingest_file 메서드는 변경할 필요 없이 그대로 사용하면 됩니다.
     async def ingest_file(self, file_input: Union[UploadFile, str, Path], metadata: Dict):
-        # (이하 로직은 이전과 동일하므로 생략)
+        # (이전 답변과 동일한 로직)
+        # ...
+        # structured_clauses = self._get_structured_data_from_llm(text) 호출 부분 포함
+        # ...
         file_path: Path
         filename: str
         temp_file_created = False
@@ -158,35 +114,30 @@ class IngestService:
             if not text or not text.strip():
                 raise ValueError(f"'{filename}' 파일에서 텍스트를 추출하지 못했습니다.")
 
-            structured_clauses = self._split_document_into_clauses(text)
+            structured_clauses = self._get_structured_data_from_llm(text)
+
             if not structured_clauses:
-                raise ValueError("문서에서 조/항을 구조적으로 분리하지 못했습니다.")
+                raise ValueError("LLM이 문서에서 조/항을 구조적으로 분리하지 못했습니다.")
 
             clauses_to_add_db = []
             chunks_for_vectorstore = []
             for item in structured_clauses:
                 clauses_to_add_db.append(Clause(
-                    document_id=db_document.id,
-                    clause_number=item["jo_number"],
-                    clause_title=item["jo_title"],
-                    item_number=item["item_number"],
-                    content=item["content"]
+                    document_id=db_document.id, clause_number=item.get("clause_number"),
+                    clause_title=item.get("clause_title"), item_number=item.get("item_number"),
+                    content=item.get("content")
                 ))
                 chunk_metadata = {
-                    "document_id": db_document.id,
-                    "tenant_id": metadata.get("tenant_id"),
-                    "jo_number": item["jo_number"],
-                    "item_number": item["item_number"]
+                    "document_id": db_document.id, "tenant_id": metadata.get("tenant_id"),
+                    "jo_number": item.get("clause_number"), "item_number": item.get("item_number")
                 }
-                chunks_for_vectorstore.append(LangchainDocument(
-                    page_content=item["content"],
-                    metadata=chunk_metadata
-                ))
+                chunks_for_vectorstore.append(
+                    LangchainDocument(page_content=item.get("content"), metadata=chunk_metadata))
 
             self.db_session.add_all(clauses_to_add_db)
             self.vector_store.add_documents(chunks_for_vectorstore)
             await self.db_session.commit()
-            logger.info(f"🎉 문서 '{filename}'의 모든 조/항({len(clauses_to_add_db)}개)을 성공적으로 인덱싱했습니다.")
+            logger.info(f"🎉 LLM을 통해 문서 '{filename}'의 모든 조/항({len(clauses_to_add_db)}개)을 성공적으로 인덱싱했습니다.")
 
         except Exception as e:
             logger.error(f"'{filename}' 처리 중 오류 발생. 롤백을 시도합니다.", exc_info=True)
@@ -195,3 +146,4 @@ class IngestService:
         finally:
             if temp_file_created and file_path.exists():
                 os.remove(file_path)
+
